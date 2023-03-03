@@ -1,39 +1,109 @@
 package main
 
 import (
+	"container/list"
 	"fmt"
+	"log"
+	"pgtracer/database"
 	"pgtracer/pgparser"
+	"strings"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
 )
 
+func getMessageQueue(clients *map[string]*pgparser.MessageQueue, ip, port string) *pgparser.MessageQueue {
+	ipPort := ip + ":" + port
+	res := (*clients)[ipPort]
+	if res == nil {
+		res = &(pgparser.MessageQueue{Ip: ip, Port: port})
+		(*clients)[ipPort] = res
+		//очередь сообщений
+		res.Messages = *list.New()
+		res.Messages.Init()
+	}
+	return res
+}
+
+func resetMessageQueue(clients *map[string]*pgparser.MessageQueue, ip, port string) {
+	ipPort := ip + ":" + port
+	res := (*clients)[ipPort]
+	if res != nil {
+		res.Id = 0
+		res.Messages.Init()
+	}
+}
+
+func getPortFromConnectionString(str string) string {
+	arr := strings.Split(str, " ")
+	for _, s := range arr {
+		s = strings.ToLower(s)
+		if strings.Contains(s, "port") {
+			res := strings.Split(s, "=")
+			return res[1]
+		}
+	}
+	return "5432" //default
+}
+
 func main() {
 	var (
-		handle *pcap.Handle
-		query  pgparser.PGQuery = pgparser.PGQuery{}
-		err    error
+		handle         *pcap.Handle
+		err            error
+		clients        map[string]*pgparser.MessageQueue
+		ip2Listen      string = "127.0.0.1"
+		deviceTolisten string
 	)
-	/*
-		devices, err := pcap.FindAllDevs()
-		if err != nil {
-			log.Fatalf("error retrieving devices - %v", err)
-		}
 
-		for _, device := range devices {
-			fmt.Printf("Device Name: %s\n", device.Name)
-			fmt.Printf("Device Description: %s\n", device.Description)
-			fmt.Printf("Device Flags: %d\n", device.Flags)
-			for _, iaddress := range device.Addresses {
-				fmt.Printf("\tInterface IP: %s\n", iaddress.IP)
-				fmt.Printf("\tInterface NetMask: %s\n", iaddress.Netmask)
+	//находим сетевой интерфейс по айпишнику из параметров
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		log.Fatalf("error retrieving devices - %v", err)
+	}
+
+	for _, device := range devices {
+		if strings.Contains(strings.ToLower(device.Name), "loopback") && ip2Listen == "127.0.0.1" {
+			deviceTolisten = device.Name
+			break
+		}
+		for _, iaddress := range device.Addresses {
+			if iaddress.IP.String() == ip2Listen {
+				deviceTolisten = device.Name
+				break
 			}
 		}
-	*/
+	}
+	if deviceTolisten == "" {
+		log.Fatal("network interface not found!")
+	}
 
-	pgPort := "5433"
+	dbConnection := "user=postgres dbname=priz password=123456 host=127.0.0.1 port=5433 sslmode=disable"
+
+	err = database.Connect(dbConnection)
+	if err != nil {
+		fmt.Println("No connection to database: ", err)
+	} else {
+		fmt.Println("Database connection ok")
+	}
+	pgPort := getPortFromConnectionString(dbConnection)
+	ownPort := ""
+
+	err = database.CreateTables()
+	if err != nil {
+		fmt.Println("Error creating table or schema: ", err)
+	}
+
+	go func() {
+		time.Sleep(time.Second)
+		database.Test()
+	}()
+
+	clients = make(map[string]*pgparser.MessageQueue)
+
 	//if handle, err = pcap.OpenLive("\\Device\\NPF_{E71C2DBE-D567-465D-B9D3-E464AB6D2C71}", 1600, true, pcap.BlockForever); err != nil {
-	if handle, err = pcap.OpenLive("\\Device\\NPF_Loopback", 1600, true, pcap.BlockForever); err != nil {
+	//"\\Device\\NPF_Loopback"
+	if handle, err = pcap.OpenLive(deviceTolisten, 65535, true, pcap.BlockForever); err != nil {
 		panic(err)
 	}
 	if err := handle.SetBPFFilter("tcp and port " + pgPort); err != nil { // optional
@@ -41,29 +111,60 @@ func main() {
 	}
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	fmt.Println("connected")
+
+	isStarted := false
+
 	for packet := range packetSource.Packets() {
 		appLayer := packet.ApplicationLayer()
+		transportLayer := packet.TransportLayer()
+		networkLayer := packet.NetworkLayer()
 
+		ipFrom := networkLayer.NetworkFlow().Src().String()
+		portFrom := transportLayer.TransportFlow().Src().String()
+
+		ipTo := networkLayer.NetworkFlow().Dst().String()
+		portTo := transportLayer.TransportFlow().Dst().String()
+
+		if portFrom == ownPort || portTo == ownPort {
+			continue
+		}
+		_ = ipTo
+		_ = ipFrom
+		_ = portFrom
+		_ = clients
 		if appLayer != nil {
+
 			data := (appLayer.Payload())
 
-			if packet.TransportLayer().TransportFlow().Src().String() != pgPort {
+			if portTo == pgPort {
 				//запрос
-				fmt.Println("received data: ", data)
-				fmt.Println("received data: ", string(data))
+				//отсекаем "свои" запросы
+				if strings.Contains(string(data), "pgparser test") {
+					ownPort = portFrom
+					continue
+				}
 
 				if pgparser.IsQueryStart(data[0]) {
-					query = pgparser.PGQuery{}
-				} else {
-					_ = 0
-					//fmt.Println("received: ", data)
-					//fmt.Println("received (str): ", string(data))
+					isStarted = true
+					resetMessageQueue(&clients, ipFrom, portFrom)
 				}
-				query.ParsePacket(data)
+				if isStarted {
+					isStarted = true
+					//fmt.Println("raw query: ", string(data), " ", portFrom)
+					//fmt.Println("raw query (byte): ", data)
+					queue := getMessageQueue(&clients, ipFrom, portFrom)
+					queue.ParseMessages(data)
+
+				}
 			} else {
 				//ответ
-				//fmt.Println("sent data: ", data)
-				//fmt.Println("sent data (str): ", string(data))
+				if isStarted {
+					//fmt.Println("raw answer: ", string(data))
+					//fmt.Println("raw answer (byte): ", data)
+
+					queue := getMessageQueue(&clients, ipTo, portTo)
+					queue.ParseAnswerMessages(data)
+				}
 				_ = 0
 			}
 		}
