@@ -21,7 +21,7 @@ func Test() (err error) {
 	if DB == nil {
 		return
 	}
-	_, err = DB.Exec(`select 'pgparser test'`)
+	_, err = DB.Exec(`select 'pgtracer test'`)
 	return
 }
 
@@ -29,19 +29,19 @@ func CreateTables() (err error) {
 	if DB == nil {
 		return
 	}
-	_, err = DB.Exec(`create schema if not exists pgparser;`)
+	_, err = DB.Exec(`create schema if not exists pgtracer;`)
 	if err != nil {
 		return
 	}
 
-	_, err = DB.Exec(`create table if not exists pgparser.queries(id bigint generated always as identity, 
+	_, err = DB.Exec(`create table if not exists pgtracer.queries(id bigint generated always as identity, 
 						ip varchar(14), port varchar(5), 
 						querytext varchar, queryresult varchar, 
 						timeStart timestamp, timefinish timestamp, errortext varchar)`)
 	if err != nil {
 		return
 	}
-	_, err = DB.Exec(`create table if not exists pgparser.params(id bigint generated always as identity, 
+	_, err = DB.Exec(`create table if not exists pgtracer.params(id bigint generated always as identity, 
 							queryid bigint, value varchar)`)
 	return
 

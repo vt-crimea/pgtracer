@@ -2,8 +2,8 @@ package main
 
 import (
 	"container/list"
-	"fmt"
 	"log"
+	"os"
 	"pgtracer/database"
 	"pgtracer/pgparser"
 	"strings"
@@ -47,12 +47,38 @@ func getPortFromConnectionString(str string) string {
 	return "5432" //default
 }
 
+func getParamFromOSArgs(par string) string {
+	for i, arg := range os.Args {
+		//log.Println(arg)
+		if strings.ToLower(arg) == par {
+			if len(os.Args) < i+2 {
+				break
+			}
+			return os.Args[i+1]
+		}
+	}
+
+	return ""
+	/*
+		params := strings.Join(os.Args, " ")
+
+		for _, ch := range params {
+			log.Println(ch)
+		}
+	*/
+}
+
 func main() {
 	var (
-		handle         *pcap.Handle
-		err            error
-		clients        map[string]*pgparser.MessageQueue
-		ip2Listen      string = "127.0.0.1"
+		handle  *pcap.Handle
+		err     error
+		clients map[string]*pgparser.MessageQueue
+		ownPort string = ""
+
+		dbConnection   string = getParamFromOSArgs("-db")
+		ip2Listen      string = getParamFromOSArgs("-iplisten")
+		ipFilter       string = getParamFromOSArgs("-ipfilter")
+		pgPort         string = getParamFromOSArgs("-pgport")
 		deviceTolisten string
 	)
 
@@ -78,20 +104,20 @@ func main() {
 		log.Fatal("network interface not found!")
 	}
 
-	dbConnection := "user=postgres dbname=priz password=123456 host=127.0.0.1 port=5433 sslmode=disable"
-
 	err = database.Connect(dbConnection)
 	if err != nil {
-		fmt.Println("No connection to database: ", err)
+		log.Println("No connection to database: ", err)
 	} else {
-		fmt.Println("Database connection ok")
+		log.Println("Database connection ok")
 	}
-	pgPort := getPortFromConnectionString(dbConnection)
-	ownPort := ""
+	//если порт не указали напрямую, берем его из настроек бд
+	if pgPort == "" {
+		pgPort = getPortFromConnectionString(dbConnection)
+	}
 
 	err = database.CreateTables()
 	if err != nil {
-		fmt.Println("Error creating table or schema: ", err)
+		log.Println("Error creating table or schema: ", err)
 	}
 
 	go func() {
@@ -110,7 +136,7 @@ func main() {
 		panic(err)
 	}
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	fmt.Println("connected")
+	log.Println("Capture started")
 
 	isStarted := false
 
@@ -138,9 +164,14 @@ func main() {
 
 			if portTo == pgPort {
 				//запрос
+
 				//отсекаем "свои" запросы
-				if strings.Contains(string(data), "pgparser test") {
+				if strings.Contains(string(data), "pgtracer") || strings.Contains(string(data), "pg_") {
 					ownPort = portFrom
+					continue
+				}
+				//отсекаем по фильтру
+				if ipFilter != "" && ipFrom != ipFilter {
 					continue
 				}
 
@@ -150,17 +181,22 @@ func main() {
 				}
 				if isStarted {
 					isStarted = true
-					//fmt.Println("raw query: ", string(data), " ", portFrom)
-					//fmt.Println("raw query (byte): ", data)
+					//log.Println("raw query: ", string(data), " ", portFrom)
+					//log.Println("raw query (byte): ", data)
 					queue := getMessageQueue(&clients, ipFrom, portFrom)
 					queue.ParseMessages(data)
-
 				}
 			} else {
 				//ответ
+
+				//отсекаем по фильтру
+				if ipFilter != "" && ipTo != ipFilter {
+					continue
+				}
+
 				if isStarted {
-					//fmt.Println("raw answer: ", string(data))
-					//fmt.Println("raw answer (byte): ", data)
+					//log.Println("raw answer: ", string(data))
+					//log.Println("raw answer (byte): ", data)
 
 					queue := getMessageQueue(&clients, ipTo, portTo)
 					queue.ParseAnswerMessages(data)

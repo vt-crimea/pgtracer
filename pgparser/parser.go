@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"container/list"
 	"encoding/binary"
-	"fmt"
+	"log"
 	"pgtracer/database"
 	"strings"
 	"time"
@@ -126,12 +126,12 @@ func (q *MessageQueue) ParseContents(tag byte, contents []byte, direction messag
 		q.TimeStart = time.Now()
 
 		if err = q.SaveQuery(database.DB); err != nil {
-			fmt.Println("eror saving query: ", err)
+			log.Println("eror saving query: ", err)
 		}
 	case TagBind:
 		err = q.ParseParams(contents)
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 
 		q.SaveQueryParams(database.DB)
@@ -139,27 +139,31 @@ func (q *MessageQueue) ParseContents(tag byte, contents []byte, direction messag
 		q.Result = string(contents)
 		q.TimeFinish = time.Now()
 
-		fmt.Println("From:", q.Ip+":"+q.Port+"-------------------------------------------")
-		fmt.Println("Query:", q.Query)
-		fmt.Println("Params:", q.Params)
-		fmt.Println("Result:", q.Result)
-		fmt.Println("Duration:", q.TimeFinish.Sub(q.TimeStart).Milliseconds())
+		log.Println("-----------------------------------------------------------------")
+		log.Println("From:", q.Ip+":"+q.Port)
+		log.Println("Query:", q.Query)
+		log.Println("Params:", q.Params)
+		log.Println("Result:", q.Result)
+		log.Println("Duration:", q.TimeFinish.Sub(q.TimeStart).Milliseconds())
+		log.Println("-----------------------------------------------------------------")
 
 		if err = q.UpdateQuery(database.DB); err != nil {
-			fmt.Println("eror saving query: ", err)
+			log.Println("eror saving query: ", err)
 		}
 	case TagError:
 		if direction == DirectionOut {
 			q.Error = string(contents)
 			q.TimeFinish = time.Now()
-			fmt.Println("From:", q.Ip+":"+q.Port+"-------------------------------------------")
-			fmt.Println("Query:", q.Query)
-			fmt.Println("Params:", q.Params)
-			fmt.Println("Error:", q.Error)
-			fmt.Println("Duration:", q.TimeFinish.Sub(q.TimeStart).Milliseconds())
+			log.Println("-----------------------------------------------------------------")
+			log.Println("From:", q.Ip+":"+q.Port)
+			log.Println("Query:", q.Query)
+			log.Println("Params:", q.Params)
+			log.Println("Error:", q.Error)
+			log.Println("Duration:", q.TimeFinish.Sub(q.TimeStart).Milliseconds())
+			log.Println("-----------------------------------------------------------------")
 
 			if err = q.UpdateQuery(database.DB); err != nil {
-				fmt.Println("eror saving query: ", err)
+				log.Println("eror saving query: ", err)
 			}
 		}
 	}
@@ -170,7 +174,7 @@ func (q *MessageQueue) ParseContents(tag byte, contents []byte, direction messag
 func (q *MessageQueue) ParseMessages(packageData []byte) (err error) {
 	var msg *Message = &Message{}
 
-	//fmt.Println(q.Messages.Len())
+	//log.Println(q.Messages.Len())
 
 	pos := 0
 	dataLen := len(packageData)
@@ -253,7 +257,7 @@ func (q *MessageQueue) ParseAnswerMessages(packageData []byte) (err error) {
 	//ready for query and command complete
 	copy(tail[:], packageData[len-6:len])
 	if IsReadyForQuery(tail) {
-		//fmt.Println("Ready For Query")
+		//log.Println("Ready For Query")
 
 		for i := len - 7; i > 0; i-- {
 			b := packageData[i]
@@ -263,9 +267,9 @@ func (q *MessageQueue) ParseAnswerMessages(packageData []byte) (err error) {
 				bytesToRead = int(binary.BigEndian.Uint32(packageData[i+1:i+5]) - 4)
 
 				if bytesToRead == len-i-11 {
-					//fmt.Println("ok")
+					//log.Println("ok")
 					contents := packageData[i+5 : i+5+bytesToRead]
-					//fmt.Println("command complete:", string(contents))
+					//log.Println("command complete:", string(contents))
 					msg := &Message{Tag: b, Contents: contents, Direction: DirectionOut}
 					q.Messages.PushBack(msg)
 					q.ParseContents(b, contents, DirectionOut)
@@ -285,9 +289,12 @@ func (q *MessageQueue) SaveQuery(db *sqlx.DB) (err error) {
 	toReplace := []byte{0}
 
 	if q.Id == 0 {
-		sqlStr := `Insert into pgparser.queries (ip, port, querytext, timestart)
+		sqlStr := `Insert into pgtracer.queries (ip, port, querytext, timestart)
 				values ($1, $2, $3, $4) returning id`
 		query := strings.Replace(q.Query, string(toReplace), "", -1)
+		if len(query) < 5 {
+			return
+		}
 		err = db.Get(&(q.Id), sqlStr, q.Ip, q.Port, query, q.TimeStart)
 		//_, err = db.Exec(sqlStr, q.Ip, q.Port, q.Query, q.Params, q.Result, q.TimeStart, q.TimeFinish)
 
@@ -304,7 +311,7 @@ func (q *MessageQueue) UpdateQuery(db *sqlx.DB) (err error) {
 	if q.Id != 0 {
 		resText := strings.Replace(q.Result, string(toReplace), "", -1)
 		errText := strings.Replace(q.Error, string(toReplace), "", -1)
-		sqlStr := `update pgparser.queries set queryresult=$1,  
+		sqlStr := `update pgtracer.queries set queryresult=$1,  
 					timefinish=$2, errortext=$3
 					where id=$4`
 		_, err = db.Exec(sqlStr, resText, q.TimeFinish, errText, q.Id)
@@ -319,10 +326,12 @@ func (q *MessageQueue) SaveQueryParams(db *sqlx.DB) (err error) {
 	toReplace := []byte{0}
 
 	if q.Id != 0 {
-		sqlStr := `insert into pgparser.params (queryid, value) values ($1, $2) `
+		sqlStr := `insert into pgtracer.params (queryid, value) values ($1, $2) `
 		for _, p := range q.Params {
 			p := strings.Replace(p, string(toReplace), "", -1)
-			_, err = db.Exec(sqlStr, q.Id, p)
+			if p != "" {
+				_, err = db.Exec(sqlStr, q.Id, p)
+			}
 		}
 	}
 	return
